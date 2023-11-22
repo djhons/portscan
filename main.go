@@ -4,29 +4,36 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"net"
+	"os"
 	"strings"
 	"time"
 )
 
-func scanPorts(ip string, ports []int, sem chan struct{}) {
+func scanPorts(ip string, ports []int, sem chan struct{}, file *os.File) {
 
 	for _, port := range ports {
 		sem <- struct{}{} // 占用一个通道空位，如果通道已满，这里会阻塞直到有空位
 		go func(p int) {
-			defer func() { <-sem }() // 释放通道空位
+			defer func() {
+				<-sem
+			}() // 释放通道空位
+
 			target := fmt.Sprintf("%s:%d", ip, p)
 
 			conn, err := net.DialTimeout("tcp", target, time.Second*1)
 			if err != nil {
-				if p == 80 {
-					fmt.Println(err.Error())
-				}
-				// Port closed or unreachable
 				return
 			}
 			defer conn.Close()
-			fmt.Printf("Port %d on %s is open\n", p, ip)
+
+			output := fmt.Sprintf("Port %d on %s is open\n", p, ip)
+			fmt.Print(output)                 // 将输出打印到控制台
+			_, err = file.WriteString(output) // 将输出追加写入文件
+			if err != nil {
+				fmt.Println("Error writing to file:", err)
+			}
 		}(port)
 	}
 }
@@ -37,8 +44,8 @@ func main() {
 	var maxThreads int
 
 	flag.StringVar(&ip, "ip", "", "IP address or range to scan")
-	flag.StringVar(&portsStr, "ports", "80", "Ports to scan (comma-separated or range)")
-	flag.IntVar(&maxThreads, "threads", 100, "Number of threads to use")
+	flag.StringVar(&portsStr, "p", "80", "Ports to scan (comma-separated or range)")
+	flag.IntVar(&maxThreads, "t", 100, "Number of threads to use")
 
 	flag.Parse()
 
@@ -64,17 +71,26 @@ func main() {
 	sem := make(chan struct{}, maxThreads) // 创建带缓冲通道
 
 	ipList := expandIPRange(ip)
+	file, err := os.OpenFile("output.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Println("Error opening file:", err)
+		return
+	}
+	defer file.Close()
 	for _, ip := range ipList {
-		scanPorts(ip, ports, sem)
+		scanPorts(ip, ports, sem, file)
 	}
 	close(sem) // 关闭通道
 }
-
 func expandIPRange(ipRange string) []string {
 	ipList := []string{}
 
-	if strings.Contains(ipRange, "-") {
+	if strings.Contains(ipRange, "-") || net.ParseIP(ipRange) != nil {
 		ipRangeSlice := strings.Split(ipRange, "-")
+		if len(ipRangeSlice) < 2 {
+			ipList = append(ipList, ipRange)
+			return ipList
+		}
 		startIP := net.ParseIP(ipRangeSlice[0])
 		endIP := net.ParseIP(ipRangeSlice[1])
 
@@ -87,7 +103,20 @@ func expandIPRange(ipRange string) []string {
 			ipList = append(ipList, ip.String())
 		}
 	} else {
-		ipList = append(ipList, ipRange)
+		// Check if ipRange is a filename
+		fileContent, err := ioutil.ReadFile(ipRange)
+		if err != nil {
+			fmt.Println("Error reading file:", err)
+			return ipList
+		}
+
+		fileIPs := strings.Split(string(fileContent), "\n")
+		for _, ip := range fileIPs {
+			ip = strings.TrimSpace(ip)
+			if net.ParseIP(ip) != nil {
+				ipList = append(ipList, ip)
+			}
+		}
 	}
 
 	return ipList
